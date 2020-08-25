@@ -8,8 +8,29 @@ import csv
 
 BANDCAMP_FRONTPAGE='https://bandcamp.com/'
 
+TrackRec = namedtuple('TrackRec', [
+    'title',
+    'artist',
+    'artist_url',
+    'album',
+    'album_url',
+    'timestamp'  
+])
+
 class BandLeader():
-    def __init__(self):
+    def __init__(self, csvpath=None):
+        # Database states
+        self.database_path = csvpath
+        self.database = []
+        self._current_track_record = None
+
+        # Load database from disk if possible
+        if isfile(self.database_path):
+            with open(self.database_path, newline='') as dbfile:
+                dbreader = csv.reader(dbfile)
+                next(dbreader) # To ignore the header line
+                self.database = [TrackRec._make(rec) for rec in dbreader]
+
         # Create a headless browser
         opts = Options()
         opts.headless = True
@@ -20,6 +41,36 @@ class BandLeader():
         self._current_track_number = 1
         self.track_list = []
         self.tracks()
+        
+        # Database maintenance thread
+        self.thread = Thread(target=self._maintain)
+        self.thread.daemon = True           # Kills the thread when the main process dies
+        self.thread.start()
+
+    def save_db(self):
+        with open(self.database_path, 'w', newline='') as dbfile:
+            dbwriter = csv.writer(dbfile)
+            dbwriter.writerow(list(TrackRec._fields))
+            for entry in self.database:
+                dbwriter.writerow(list(entry))
+
+    def _maintain(self):
+        while True:
+            self._update_db()
+            sleep(20) # Check every 20 seconds
+    
+    def _update_db(self):
+        try:
+            check = (self._current_track_record is not None 
+                and (len(self.database) == 0 or self.database[-1] != self._current_track_record)
+                and self.is_playing()
+            )
+
+            if check:
+                self.database.append(self._current_track_record)
+                self.save_db()
+        except Exception as e:
+            print('error while updating the db: {}'.format(e))
 
     def tracks(self):
         '''
@@ -81,6 +132,11 @@ class BandLeader():
         elif type(track) is int and track <= len(self.track_list) and track >= 1:
             self._current_track_number = track
             self.track_list[self._current_track_number - 1].click()
+        
+        sleep(0.5)
+        if self.is_playing():
+            self._current_track_record = self.currently_playing()
+
     
     def play_next(self):
         '''
@@ -99,6 +155,35 @@ class BandLeader():
         '''
 
         self.play()
+
+    def is_playing(self):
+        '''
+        Returns `True` if a track is presently playing
+        '''
+
+        playbtn = self.browser.find_elements_by_class_name('playbutton')
+        return playbtn[0].get_attribute('class').find('playing') > -1
+
+    def currently_playing(self):
+        '''
+        Returns the record for the currently playing track or None if nothing is playing
+        '''
+
+        try:
+            if self.is_playing():
+                title = self.browser.find_elements_by_class_name('title')[0].text
+                album_detail = self.browser.find_elements_by_css_selector('.detail-album > a')
+                album_title = album_detail[0].text
+                album_url = album_detail[0].get_attribute('href').split('?')[0]
+                artist_detail = self.browser.find_elements_by_css_selector('.detail-artist > a')
+                artist = artist_detail[0].text
+                artist_url = artist_detail[0].get_attribute('href').split('?')[0]
+                return TrackRec(title, artist, artist_url, album_title, album_url, ctime())
+        except Exception as e:
+            print('There was an error: {}'.format(e))
+
+        return None  
+        
     
     def quit(self):
         '''
